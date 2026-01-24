@@ -24,11 +24,11 @@ cursor = db.cursor(dictionary=True)
 # =========================
 # HELPERS
 # =========================
-def sha256(text):
+def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def embed(text):
+def embed(text: str):
     res = client.embeddings.create(
         model="text-embedding-3-small",
         input=text
@@ -36,12 +36,12 @@ def embed(text):
     return res.data[0].embedding
 
 
-def fetch_all(query, params):
+def fetch_all(query: str, params: tuple):
     cursor.execute(query, params)
     return cursor.fetchall()
 
 
-def fetch_one(query, params):
+def fetch_one(query: str, params: tuple):
     cursor.execute(query, params)
     return cursor.fetchone()
 
@@ -49,7 +49,7 @@ def fetch_one(query, params):
 # =========================
 # MAIN QUERY
 # =========================
-TEST_EMBEDDING_IDS = (604,601,109,13)
+TEST_EMBEDDING_IDS = (604, 601, 109, 13, 601, 148,192)
 
 cursor.execute(
     """
@@ -70,13 +70,11 @@ cursor.execute(
           AND uc.contact_id = uce.contact_id
     LEFT JOIN users cu
            ON cu.phone = c.phone
-    WHERE uce.id IN (%s, %s, %s, %s)
+    WHERE uce.id IN (%s, %s, %s, %s, %s, %s,%s)
       AND uce.needs_rebuild = 1
     """,
     TEST_EMBEDDING_IDS
 )
-
-
 
 rows = cursor.fetchall()
 print(f"🔄 {len(rows)} embeddings to rebuild")
@@ -85,6 +83,7 @@ print(f"🔄 {len(rows)} embeddings to rebuild")
 # PROCESS
 # =========================
 for r in rows:
+
     # -------- NAME RESOLUTION --------
     if r["display_name"]:
         name = r["display_name"]
@@ -97,12 +96,18 @@ for r in rows:
     default_identity = "None"
     if r["contact_user_id"]:
         rows_dd = fetch_all(
-            "SELECT label, description FROM default_description WHERE users_id = %s",
+            """
+            SELECT label, description
+            FROM default_description
+            WHERE users_id = %s
+            """,
             (r["contact_user_id"],)
         )
+
         if rows_dd:
             default_identity = "\n".join(
-                f"- {d['label']}: {d['description']}" for d in rows_dd
+                f"- {d['label']}: {d['description']}"
+                for d in rows_dd
             )
 
     # -------- PERSONAL LABELS --------
@@ -116,51 +121,75 @@ for r in rows:
             """,
             (r["user_contact_id"],)
         )
+
         if rows_pl:
             personal_labels = "\n".join(
-                f"- {p['label']}: {p['description']}" for p in rows_pl
+                f"- {p['label']}: {p['description']}"
+                for p in rows_pl
             )
 
     # -------- CV --------
     cv_text = "None"
     if r["contact_user_id"]:
         cv = fetch_one(
-            "SELECT cv FROM users_cv WHERE user_id = %s",
+            """
+            SELECT cv
+            FROM users_cv
+            WHERE user_id = %s
+            """,
             (r["contact_user_id"],)
         )
+
         if cv and cv["cv"]:
             cv_text = cv["cv"]
 
-    # -------- REVIEWS --------
+    # -------- REVIEWS (WITH DESCRIPTION CONTEXT) --------
     reviews_text = "None"
     if r["contact_user_id"]:
         reviews = fetch_all(
             """
-            SELECT r.review
+            SELECT
+                r.review,
+                dd.label AS desc_label,
+                dd.description AS desc_description
             FROM reviews r
-            JOIN default_description dd ON dd.id = r.default_description_id
+            JOIN default_description dd
+                ON dd.id = r.default_description_id
             WHERE dd.users_id = %s
             """,
             (r["contact_user_id"],)
         )
+
         if reviews:
-            reviews_text = "\n".join(f"- {rv['review']}" for rv in reviews if rv["review"])
+            formatted_reviews = []
+            for rv in reviews:
+                if rv["review"]:
+                    formatted_reviews.append(
+                        f"""[REVIEW CONTEXT]
+                        Role: {rv['desc_label'] or 'Unknown'}
+                        Description: {rv['desc_description'] or 'None'}
+                        Review: {rv['review']}
+                    """
+                    )
+
+            if formatted_reviews:
+                reviews_text = "\n".join(formatted_reviews)
 
     # -------- PROFILE TEXT --------
-    profile_text = f"""CONTACT:
+    profile_text = f"""CONTACT
 Name: {name}
 Phone: {r['phone']}
 
-DEFAULT IDENTITY:
+DEFAULT IDENTITY
 {default_identity}
 
-MY PERSONAL LABELS:
+MY PERSONAL LABELS
 {personal_labels}
 
-CV:
+CV
 {cv_text}
 
-REVIEWS:
+REVIEWS
 {reviews_text}
 """
 
@@ -176,12 +205,20 @@ REVIEWS:
             needs_rebuild = 0
         WHERE id = %s
         """,
-        (profile_text, json.dumps(embedding), context_hash, r["embedding_id"])
+        (
+            profile_text,
+            json.dumps(embedding),
+            context_hash,
+            r["embedding_id"]
+        )
     )
 
     db.commit()
     print(f"✅ Updated embedding {r['embedding_id']} ({name})")
 
+# =========================
+# CLEANUP
+# =========================
 cursor.close()
 db.close()
 print("🎉 All embeddings rebuilt correctly")
