@@ -49,7 +49,7 @@ def fetch_one(query: str, params: tuple):
 # =========================
 # MAIN QUERY
 # =========================
-TEST_EMBEDDING_IDS = (604, 601, 109, 13, 601, 148,192)
+TEST_EMBEDDING_IDS = (604, 601, 109, 13, 601, 148,192,1162,1155)
 
 cursor.execute(
     """
@@ -70,7 +70,7 @@ cursor.execute(
           AND uc.contact_id = uce.contact_id
     LEFT JOIN users cu
            ON cu.phone = c.phone
-    WHERE uce.id IN (%s, %s, %s, %s, %s, %s,%s)
+    WHERE uce.id IN (%s, %s, %s, %s, %s, %s,%s,%s,%s)
       AND uce.needs_rebuild = 1
     """,
     TEST_EMBEDDING_IDS
