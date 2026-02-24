@@ -3,7 +3,11 @@ import numpy as np
 from app.core.database import get_cursor
 from app.utils.math import cosine
 
-def retrieve_candidates(user_id: int, query_embedding, top_k: int = 20):
+
+
+
+def retrieve_candidates(user_id: int, query_embedding, top_k: int = 40):
+
     cur = get_cursor()
 
     cur.execute("""
@@ -18,7 +22,13 @@ def retrieve_candidates(user_id: int, query_embedding, top_k: int = 20):
     """, (user_id,))
 
     results = []
+
     for r in cur.fetchall():
+
+        profile_text = (r["profile_text"] or "").strip()
+
+
+
         emb = np.array(json.loads(r["embedding"]), dtype=np.float32)
         score = cosine(query_embedding, emb)
 
@@ -26,12 +36,14 @@ def retrieve_candidates(user_id: int, query_embedding, top_k: int = 20):
             "contact_id": r["contact_id"],
             "name": r["display_name"] or "(no name)",
             "phone": r["phone"],
-            "profile_text": r["profile_text"],
-            "score": score
+            "profile_text": profile_text,
+            "score": float(score)
         })
 
+    # Sort by semantic score
     results.sort(key=lambda x: x["score"], reverse=True)
 
+    # Assign stable idx AFTER sorting
     for i, r in enumerate(results[:top_k]):
         r["idx"] = i
 

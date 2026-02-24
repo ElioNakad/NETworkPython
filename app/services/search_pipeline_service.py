@@ -1,37 +1,33 @@
-from fastapi import APIRouter
-from app.models.schemas import SearchRequest
 from app.services.embedding_service import get_embedding
 from app.services.retrieval_service import retrieve_candidates
 from app.services.llm_filter_service import llm_filter
 from app.services.query_classifier_service import classify_query
 
-router = APIRouter()
 
+def run_ai_search(user_id: int, prompt: str, top_k: int = 40, top_n: int = 5):
 
-@router.post("/search")
-def search(req: SearchRequest):
+    # 1️⃣ Embed
+    query_embedding = get_embedding(prompt)
 
-    # 1️⃣ Embed query
-    query_embedding = get_embedding(req.prompt)
-
-    # 2️⃣ Retrieve wide candidates (NO threshold)
+    # 2️⃣ Retrieve
     candidates = retrieve_candidates(
-        req.user_id,
-        query_embedding,
-        top_k=40
+        user_id=user_id,
+        query_embedding=query_embedding,
+        top_k=top_k
     )
 
     if not candidates:
         return []
 
-    # 3️⃣ Classify query intent
-    query_type = classify_query(req.prompt)
+    # 3️⃣ Classify
+    query_type = classify_query(prompt)
 
-    # 4️⃣ LLM filtering with intent awareness
+    # 4️⃣ LLM filter
     judged = llm_filter(
-        prompt=req.prompt,
+        prompt=prompt,
         candidates=candidates,
-        query_type=query_type
+        query_type=query_type,
+        top_n=top_n
     )
 
     judged_map = {
@@ -42,7 +38,7 @@ def search(req: SearchRequest):
 
     final = []
 
-    # 5️⃣ Strict merge
+    # 5️⃣ STRICT MERGE (exact same as /search)
     for c in candidates:
         j = judged_map.get(c["idx"])
         if not j:
@@ -56,10 +52,7 @@ def search(req: SearchRequest):
             "profile_text": c["profile_text"]
         })
 
-    # 6️⃣ Rank ONLY by LLM confidence
-    final.sort(
-        key=lambda x: x["confidence"],
-        reverse=True
-    )
+    # 6️⃣ Rank by confidence
+    final.sort(key=lambda x: x["confidence"], reverse=True)
 
-    return final[:5]
+    return final[:top_n]

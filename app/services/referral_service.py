@@ -1,19 +1,31 @@
 from app.services.embedding_service import get_embedding
 from app.services.retrieval_service import retrieve_candidates
 from app.services.llm_filter_service import llm_filter
-from app.db import get_db
+from app.services.query_classifier_service import classify_query
+import mysql.connector
+import os
 
 
 def referral_search(my_user_id: int, prompt: str):
-    db = get_db()
+
+    # 🔥 Open fresh connection every time
+    db = mysql.connector.connect(
+        host=os.getenv("DB_HOST"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        database=os.getenv("DB_NAME"),
+        autocommit=True   # VERY IMPORTANT
+    )
+
     cursor = db.cursor(dictionary=True)
 
-    # 1️⃣ Get MY contacts who are also users AND allow referrals
+    # 1️⃣ Get my contacts who are users AND allow referral
     cursor.execute("""
         SELECT
             uc.display_name,
             u.id   AS referrer_user_id,
-            u.phone
+            u.phone,
+            u.refer
         FROM user_contacts uc
         JOIN contacts c ON c.id = uc.contact_id
         JOIN users u ON u.phone = c.phone
@@ -22,36 +34,74 @@ def referral_search(my_user_id: int, prompt: str):
     """, (my_user_id,))
 
     referrers = cursor.fetchall()
+
     if not referrers:
+        cursor.close()
+        db.close()
         return []
+
+    # 2️⃣ Embed & classify once
+    query_embedding = get_embedding(prompt)
+    query_type = classify_query(prompt)
 
     results = []
 
-    # 2️⃣ Embed prompt ONCE
-    query_embedding = get_embedding(prompt)
-
-    # 3️⃣ For each referrer X → run SAME AI search logic as normal search
+    # 3️⃣ For each referrer → run SAME search pipeline
     for x in referrers:
+
         referrer_id = x["referrer_user_id"]
 
-        # retrieve candidates FROM X's embeddings
         candidates = retrieve_candidates(
             user_id=referrer_id,
             query_embedding=query_embedding,
-            top_k=20
+            top_k=40
         )
 
         if not candidates:
             continue
 
-        # strict LLM filter (same as normal AI search)
-        judged = llm_filter(prompt, candidates, top_n=1)
+        judged = llm_filter(
+            prompt=prompt,
+            candidates=candidates,
+            query_type=query_type
+        )
 
-        # if X has at least ONE valid match → X can refer
-        if judged:
-            results.append({
-                "name": x["display_name"],
-                "phone": x["phone"]
+        if not judged:
+            continue
+
+        judged_map = {
+            j["idx"]: j
+            for j in judged
+            if isinstance(j.get("idx"), int)
+        }
+
+        final = []
+
+        for c in candidates:
+            j = judged_map.get(c["idx"])
+            if not j:
+                continue
+
+            final.append({
+                "confidence": j.get("confidence", 0.0)
             })
 
-    return results
+        if not final:
+            continue
+
+        best_confidence = max(f["confidence"] for f in final)
+
+        results.append({
+            "name": x["display_name"],
+            "phone": x["phone"],
+            "confidence": best_confidence
+        })
+
+    # 4️⃣ Rank by strength
+    results.sort(key=lambda x: x["confidence"], reverse=True)
+
+    # 🔥 CLOSE CONNECTION
+    cursor.close()
+    db.close()
+
+    return results[:5]
