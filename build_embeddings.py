@@ -4,6 +4,7 @@ import hashlib
 import mysql.connector
 from dotenv import load_dotenv
 from openai import OpenAI
+from pymongo import MongoClient
 
 # =========================
 # ENV SETUP
@@ -12,6 +13,7 @@ load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# MYSQL CONNECTION
 db = mysql.connector.connect(
     host=os.getenv("DB_HOST"),
     user=os.getenv("DB_USER"),
@@ -20,6 +22,11 @@ db = mysql.connector.connect(
 )
 
 cursor = db.cursor(dictionary=True)
+
+# MONGODB CONNECTION
+mongo_client = MongoClient(os.getenv("MONGO_URI"))
+mongo_db = mongo_client[os.getenv("MONGO_DB")]
+reviews_collection = mongo_db["reviews"]
 
 # =========================
 # HELPERS
@@ -49,7 +56,7 @@ def fetch_one(query: str, params: tuple):
 # =========================
 # MAIN QUERY
 # =========================
-TEST_EMBEDDING_IDS = (1344,367,604, 601, 109, 13, 601, 148,192,1162,1155,36)
+TEST_EMBEDDING_IDS = (1344,367,604,601,109,13,601,148,192,1162,1155,36)
 
 cursor.execute(
     """
@@ -70,7 +77,7 @@ cursor.execute(
           AND uc.contact_id = uce.contact_id
     LEFT JOIN users cu
            ON cu.phone = c.phone
-    WHERE uce.id IN (%s,%s,%s, %s, %s, %s, %s, %s,%s,%s,%s,%s)
+    WHERE uce.id IN (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
       AND uce.needs_rebuild = 1
     """,
     TEST_EMBEDDING_IDS
@@ -78,6 +85,7 @@ cursor.execute(
 
 rows = cursor.fetchall()
 print(f"🔄 {len(rows)} embeddings to rebuild")
+
 
 # =========================
 # PROCESS
@@ -143,37 +151,46 @@ for r in rows:
         if cv and cv["cv"]:
             cv_text = cv["cv"]
 
-    # -------- REVIEWS (WITH DESCRIPTION CONTEXT) --------
+    # ==========================================
+    # 🔥 REVIEWS (NOW FROM MONGODB)
+    # ==========================================
     reviews_text = "None"
+
     if r["contact_user_id"]:
-        reviews = fetch_all(
+
+        # get all default descriptions for that user
+        desc_rows = fetch_all(
             """
-            SELECT
-                r.review,
-                dd.label AS desc_label,
-                dd.description AS desc_description
-            FROM reviews r
-            JOIN default_description dd
-                ON dd.id = r.default_description_id
-            WHERE dd.users_id = %s
+            SELECT id, label, description
+            FROM default_description
+            WHERE users_id = %s
             """,
             (r["contact_user_id"],)
         )
 
-        if reviews:
-            formatted_reviews = []
-            for rv in reviews:
-                if rv["review"]:
+        formatted_reviews = []
+
+        for desc in desc_rows:
+
+            # fetch reviews from Mongo
+            mongo_reviews = reviews_collection.find({
+                "default_description_id": desc["id"]
+            })
+
+            for rv in mongo_reviews:
+
+                if rv.get("review"):
+
                     formatted_reviews.append(
                         f"""[REVIEW CONTEXT]
-                        Role: {rv['desc_label'] or 'Unknown'}
-                        Description: {rv['desc_description'] or 'None'}
-                        Review: {rv['review']}
-                    """
+Role: {desc['label'] or 'Unknown'}
+Description: {desc['description'] or 'None'}
+Review: {rv['review']}
+"""
                     )
 
-            if formatted_reviews:
-                reviews_text = "\n".join(formatted_reviews)
+        if formatted_reviews:
+            reviews_text = "\n".join(formatted_reviews)
 
     # -------- PROFILE TEXT --------
     profile_text = f"""CONTACT
@@ -216,9 +233,12 @@ REVIEWS
     db.commit()
     print(f"✅ Updated embedding {r['embedding_id']} ({name})")
 
+
 # =========================
 # CLEANUP
 # =========================
 cursor.close()
 db.close()
+mongo_client.close()
+
 print("🎉 All embeddings rebuilt correctly")
