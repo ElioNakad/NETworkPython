@@ -1,8 +1,24 @@
-import mysql.connector
 import json
 import re
+import os
 from sklearn.feature_extraction.text import TfidfVectorizer
-from app.db import get_db  # IMPORTANT (use your FastAPI DB helper)
+from pymongo import MongoClient
+from dotenv import load_dotenv
+from app.db import get_db
+
+# ==========================================
+# LOAD ENV
+# ==========================================
+
+load_dotenv()
+
+# ==========================================
+# MONGODB CONNECTION
+# ==========================================
+
+mongo_client = MongoClient(os.getenv("MONGO_URI"))
+mongo_db = mongo_client[os.getenv("MONGO_DB")]
+reviews_collection = mongo_db["reviews"]
 
 
 # ==========================================
@@ -18,6 +34,7 @@ STRUCTURAL_WORDS = {
 }
 
 def clean_profile_text(text: str):
+
     text = text.lower()
 
     text = re.sub(r'\+?\d+', ' ', text)
@@ -48,11 +65,15 @@ def build_profile_text(cursor, user_id):
     name = f"{user['fname']} {user['lname']}".strip()
     phone = user['phone'] if user['phone'] else "None"
 
+    # ==========================================
     # DEFAULT IDENTITY
+    # ==========================================
+
     cursor.execute(
         "SELECT id, label, description FROM default_description WHERE users_id = %s",
         (user_id,)
     )
+
     defaults = cursor.fetchall()
 
     if defaults:
@@ -64,32 +85,55 @@ def build_profile_text(cursor, user_id):
     else:
         default_text = "None"
 
+    # ==========================================
     # CV
+    # ==========================================
+
     cursor.execute(
         "SELECT cv FROM users_cv WHERE user_id = %s ORDER BY id DESC LIMIT 1",
         (user_id,)
     )
+
     cv_row = cursor.fetchone()
 
     cv_text = cv_row["cv"] if cv_row and cv_row["cv"] else "None"
 
-    # REVIEWS
-    cursor.execute("""
-        SELECT r.review,
-               d.label,
-               d.description
-        FROM reviews r
-        JOIN default_description d
-            ON r.default_description_id = d.id
-        WHERE d.users_id = %s
-    """, (user_id,))
+    # ==========================================
+    # REVIEWS (MongoDB)
+    # ==========================================
 
-    review_rows = cursor.fetchall()
+    review_rows = []
+
+    if defaults:
+
+        default_ids = [d["id"] for d in defaults]
+
+        mongo_reviews = list(
+            reviews_collection.find(
+                {"default_description_id": {"$in": default_ids}},
+                {"review": 1, "default_description_id": 1, "_id": 0}
+            )
+        )
+
+        default_map = {d["id"]: d for d in defaults}
+
+        for r in mongo_reviews:
+
+            d = default_map.get(r["default_description_id"])
+
+            if d:
+                review_rows.append({
+                    "review": r["review"],
+                    "label": d["label"],
+                    "description": d["description"]
+                })
 
     if review_rows:
+
         review_blocks = []
 
         for row in review_rows:
+
             block = f"""
 [REVIEW CONTEXT]
 Role: {row['label']}
@@ -102,8 +146,14 @@ Review:
             review_blocks.append(block)
 
         review_text = "\n\n".join(review_blocks)
+
     else:
+
         review_text = "None"
+
+    # ==========================================
+    # FINAL PROFILE TEXT
+    # ==========================================
 
     profile_text = f"""
 CONTACT:
@@ -140,10 +190,13 @@ def rebuild_all_vectors():
     user_ids = []
 
     for row in rows:
+
         uid = row["user_id"]
+
         formatted_text = build_profile_text(cursor, uid)
 
         if formatted_text:
+
             cleaned_text = clean_profile_text(formatted_text)
 
             display_texts.append(formatted_text)
@@ -162,6 +215,7 @@ def rebuild_all_vectors():
     X = vectorizer.fit_transform(cleaned_texts)
 
     for i, user_id in enumerate(user_ids):
+
         vector = X[i].toarray()[0]
         vector_json = json.dumps(vector.tolist())
 
