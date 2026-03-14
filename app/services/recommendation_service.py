@@ -3,6 +3,42 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from app.db import get_db
 
+def find_bridge_user(user_a, user_b_phone):
+
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT 
+    u.id AS bridge_id,
+    u.fname,
+    u.lname,
+    u.phone
+FROM user_contacts ucA
+JOIN contacts cA ON cA.id = ucA.contact_id
+JOIN users u ON u.phone = cA.phone
+JOIN user_contacts ucC ON ucC.user_id = u.id
+JOIN contacts cC ON cC.id = ucC.contact_id
+WHERE ucA.user_id = %s
+AND cC.phone = %s
+AND u.refer = 'true'
+LIMIT 1
+
+    """, (user_a, user_b_phone))
+
+    row = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    if row:
+        return {
+            "name": f"{row['fname']} {row['lname']}",
+            "phone": row["phone"]
+        }
+
+    return None
+
 
 def get_recommendations_for_user(user_id: int, top_n: int = 5):
     conn = get_db()
@@ -81,16 +117,21 @@ def get_recommendations_for_user(user_id: int, top_n: int = 5):
     recommendations = []
 
     for idx, sim_score in enumerate(similarities):
+
         if sim_score < MIN_SIMILARITY:
             continue
 
         other_user_id = candidate_ids[idx]
 
+        # NEW: find mutual contact
+        bridge = find_bridge_user(user_id, user_meta[other_user_id]["phone"])
+
         recommendations.append({
             "user_id": other_user_id,
             "name": f"{user_meta[other_user_id]['fname']} {user_meta[other_user_id]['lname']}",
-            "phone": user_meta[other_user_id]["phone"],  # ✅ return phone to frontend
-            "similarity_score": float(sim_score)
+            "phone": user_meta[other_user_id]["phone"],
+            "similarity_score": float(sim_score),
+            "bridge_user": bridge
         })
 
     recommendations.sort(key=lambda x: x["similarity_score"], reverse=True)
