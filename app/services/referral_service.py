@@ -21,17 +21,34 @@ def referral_search(my_user_id: int, prompt: str):
 
     # 1️⃣ Get my contacts who are users AND allow referral
     cursor.execute("""
-        SELECT
-            uc.display_name,
-            u.id   AS referrer_user_id,
-            u.phone,
-            u.refer
-        FROM user_contacts uc
-        JOIN contacts c ON c.id = uc.contact_id
-        JOIN users u ON u.phone = c.phone
-        WHERE uc.user_id = %s
-          AND u.refer = 'true'
-    """, (my_user_id,))
+    SELECT
+        uc.display_name,
+        u.id AS referrer_user_id,
+        u.phone,
+        u.refer
+    FROM user_contacts uc
+    JOIN contacts c 
+        ON c.id = uc.contact_id
+    JOIN users u 
+        ON u.phone = c.phone
+
+    -- get X's phone
+    JOIN users me 
+        ON me.id = %s
+
+    -- check if Y blocked X
+    LEFT JOIN contacts my_contact_in_y 
+        ON my_contact_in_y.phone = me.phone
+
+    LEFT JOIN user_contacts blockcheck
+        ON blockcheck.user_id = u.id
+       AND blockcheck.contact_id = my_contact_in_y.id
+       AND blockcheck.block = 'true'
+
+    WHERE uc.user_id = %s
+      AND u.refer = 'true'
+      AND blockcheck.id IS NULL
+""", (my_user_id, my_user_id))
 
     referrers = cursor.fetchall()
 
