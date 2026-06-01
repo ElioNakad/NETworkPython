@@ -3,6 +3,25 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from app.db import get_db
 
+
+def get_default_labels(user_id):
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT label
+        FROM default_description
+        WHERE users_id = %s
+    """, (user_id,))
+
+    rows = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return [row["label"] for row in rows]
+
+
 def find_bridge_user(user_a, user_b_phone):
 
     conn = get_db()
@@ -10,21 +29,47 @@ def find_bridge_user(user_a, user_b_phone):
 
     cursor.execute("""
         SELECT 
-    u.id AS bridge_id,
-    u.fname,
-    u.lname,
-    u.phone
-FROM user_contacts ucA
-JOIN contacts cA ON cA.id = ucA.contact_id
-JOIN users u ON u.phone = cA.phone
-JOIN user_contacts ucC ON ucC.user_id = u.id
-JOIN contacts cC ON cC.id = ucC.contact_id
-WHERE ucA.user_id = %s
-AND cC.phone = %s
-AND u.refer = 'true'
-LIMIT 1
+            u.id AS bridge_id,
+            u.fname,
+            u.lname,
+            u.phone,
+            ucDisplay.display_name
+        FROM user_contacts ucA
+        JOIN contacts cA ON cA.id = ucA.contact_id
+        JOIN users u ON u.phone = cA.phone
 
-    """, (user_a, user_b_phone))
+        -- ✅ get how user A saved this contact
+        JOIN user_contacts ucDisplay 
+            ON ucDisplay.user_id = %s 
+            AND ucDisplay.contact_id = cA.id
+
+        JOIN user_contacts ucC ON ucC.user_id = u.id
+        JOIN contacts cC ON cC.id = ucC.contact_id
+        JOIN users targetUser ON targetUser.phone = cC.phone
+
+        -- check if B blocked A
+        LEFT JOIN contacts aContact ON aContact.phone = (
+            SELECT phone FROM users WHERE id = %s
+        )
+        LEFT JOIN user_contacts blockBA 
+            ON blockBA.user_id = u.id
+            AND blockBA.contact_id = aContact.id
+
+        -- check if C blocked B
+        LEFT JOIN contacts bContact ON bContact.phone = u.phone
+        LEFT JOIN user_contacts blockCB
+            ON blockCB.user_id = targetUser.id
+            AND blockCB.contact_id = bContact.id
+
+        WHERE ucA.user_id = %s
+        AND cC.phone = %s
+        AND u.refer = 'true'
+
+        AND (blockBA.block IS NULL OR blockBA.block != 'true')
+        AND (blockCB.block IS NULL OR blockCB.block != 'true')
+
+        LIMIT 1
+    """, (user_a, user_a, user_a, user_b_phone))
 
     row = cursor.fetchone()
 
@@ -33,7 +78,7 @@ LIMIT 1
 
     if row:
         return {
-            "name": f"{row['fname']} {row['lname']}",
+            "name": row["display_name"] if row["display_name"] else f"{row['fname']} {row['lname']}",
             "phone": row["phone"]
         }
 
@@ -103,7 +148,7 @@ def get_recommendations_for_user(user_id: int, top_n: int = 5):
         user_meta[row["id"]] = {
             "fname": row["fname"],
             "lname": row["lname"],
-            "phone": row["phone"]  # ✅ keep phone
+            "phone": row["phone"]
         }
 
     candidate_vectors = np.array(candidate_vectors)
@@ -123,15 +168,18 @@ def get_recommendations_for_user(user_id: int, top_n: int = 5):
 
         other_user_id = candidate_ids[idx]
 
-        # NEW: find mutual contact
+        # 🔥 bridge user with correct display name
         bridge = find_bridge_user(user_id, user_meta[other_user_id]["phone"])
+
+        labels = get_default_labels(other_user_id)
 
         recommendations.append({
             "user_id": other_user_id,
             "name": f"{user_meta[other_user_id]['fname']} {user_meta[other_user_id]['lname']}",
             "phone": user_meta[other_user_id]["phone"],
             "similarity_score": float(sim_score),
-            "bridge_user": bridge
+            "bridge_user": bridge,
+            "labels": labels
         })
 
     recommendations.sort(key=lambda x: x["similarity_score"], reverse=True)
